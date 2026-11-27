@@ -1,4 +1,6 @@
 {
-  "package": "AnkiDraw - Draw and write using mouse and stylus with pressure support",
-  "name": "AnkiDraw - Draw and write using mouse and stylus with pressure support"
+  "package": "ankidraw_software_rendering",
+  "name": "AnkiDraw (software rendering test)",
+  "conflicts": ["1868980340"],
+  "human_version": "1.7-perf.2"
 }

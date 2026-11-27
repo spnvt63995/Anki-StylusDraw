@@ -610,7 +610,7 @@ function switch_text_writing_mode()
     textWriting = temp;
     if(textWriting)
     {
-        textBox.focus()
+        textBox.focus({preventScroll: true})
         ts_text_button.className = 'active';
     }
     else{
@@ -701,25 +701,87 @@ function switch_visibility()
     visible = !visible;
 }
 
-//Initialize event listeners at the start;
-canvas.addEventListener("pointerdown", pointerDownLine);
-canvas.addEventListener("pointermove", pointerMoveLine);
-secondary_canvas.addEventListener("pointerdown", pointerDownLine);
-secondary_canvas.addEventListener("pointermove", pointerMoveLine);
-window.addEventListener("pointerup", pointerUpLine);
-canvas.addEventListener("pointerdown", pointerDownCaligraphy);
-canvas.addEventListener("pointermove", pointerMoveCaligraphy);
-secondary_canvas.addEventListener("pointerdown", pointerDownCaligraphy);
-secondary_canvas.addEventListener("pointermove", pointerMoveCaligraphy);
-window.addEventListener("pointerup", pointerUpCaligraphy);
-canvas.addEventListener("pointerdown", pointerDownStrokeDelete);
-canvas.addEventListener("pointermove", pointerMoveStrokeDelete);
-secondary_canvas.addEventListener("pointerdown", pointerDownStrokeDelete);
-secondary_canvas.addEventListener("pointermove", pointerMoveStrokeDelete);
-window.addEventListener("pointerup", pointerUpStrokeDelete);
+// A pen and its emulated mouse can both be primary. One contact owns the canvas.
+let canvasPointerId = null;
+let hoveringPenButtonId = null;
+const penBarrelMask = 2;
+const penEraserMask = 32;
 
-window.addEventListener("pointerup", pointerDownLineText);
-window.addEventListener("pointerdown", pointerDownLineText);
+function penTipInContact(e) {
+    return (e.buttons & 1) !== 0 || e.pressure > 0;
+}
+
+function pointerDownCanvas(e, heldPenButton = false) {
+    if (!visible || !e.isPrimary || canvasPointerId !== null) return;
+    const pen = e.pointerType === 'pen';
+    // Qt sends an eraser tip press as button 5 even when it has no pressure sample.
+    const eraserTipDown = pen && e.type === 'pointerdown' && e.button === 5;
+    const eraser = eraserTipDown || (pen && (e.buttons & penEraserMask) !== 0);
+    const barrel = pen && (e.buttons & penBarrelMask) !== 0;
+    if ((eraser || barrel) && !eraserTipDown && !penTipInContact(e)) {
+        hoveringPenButtonId = e.pointerId;
+        return;
+    }
+    hoveringPenButtonId = null;
+    canvasPointerId = e.pointerId;
+    wrapper.classList.add('nopointer');
+    if (eraser || barrel || heldPenButton || strokeDelete) pointerDownStrokeDelete(e);
+    else if (textWriting) pointerDownLineText(e);
+    else if (calligraphy) pointerDownCaligraphy(e);
+    else pointerDownLine(e);
+}
+
+function pointerMoveCanvas(e) {
+    if (e.pointerId === hoveringPenButtonId) {
+        if (penTipInContact(e)) pointerDownCanvas(e, e.buttons === 0);
+        else if (!e.buttons) hoveringPenButtonId = null;
+        return;
+    }
+    if (e.pointerId !== canvasPointerId) return;
+    // With the barrel held, lifting the tip can be a move instead of an up.
+    if (e.pointerType === 'pen' && !penTipInContact(e) &&
+        ((e.buttons & penBarrelMask) || ((e.buttons & penEraserMask) && e.button === 0))) {
+        pointerUpCanvas(e, false);
+        hoveringPenButtonId = e.pointerId;
+        return;
+    }
+    if (currentAction.type === 'D') appendErasePoint(e);
+    else if (currentAction.type === 'C') pointerMoveCaligraphy(e);
+    else if (!textWriting) pointerMoveLine(e);
+}
+
+function pointerUpCanvas(e, includeEnd = true) {
+    if (e.pointerId === hoveringPenButtonId) hoveringPenButtonId = null;
+    if (e.pointerId !== canvasPointerId) return;
+    if (currentAction.type === 'D') {
+        if (includeEnd) appendErasePoint(e);
+        finishDelete();
+    } else if (currentAction.type === 'C') pointerUpCaligraphy(e);
+    else if (textWriting) {
+        canvasPointerId = null;
+        wrapper.classList.remove('nopointer');
+        pointerDownLineText(e);
+    } else pointerUpLine(e);
+}
+
+function cancelCanvasPointer(e) {
+    if (e.type === 'blur' || e.pointerId === hoveringPenButtonId) hoveringPenButtonId = null;
+    if (canvasPointerId === null || (e.type !== 'blur' && e.pointerId !== canvasPointerId)) return;
+    stop_drawing();
+    secondary_ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+for (const surface of [canvas, secondary_canvas]) {
+    surface.addEventListener('pointerdown', pointerDownCanvas);
+    surface.addEventListener('pointermove', pointerMoveCanvas);
+    surface.addEventListener('lostpointercapture', cancelCanvasPointer);
+    surface.addEventListener('contextmenu', e => {
+        if (e.pointerType === 'pen' && (e.button === 2 || e.button === 5)) e.preventDefault();
+    });
+}
+window.addEventListener('pointerup', pointerUpCanvas);
+window.addEventListener('pointercancel', cancelCanvasPointer);
+window.addEventListener('blur', cancelCanvasPointer);
 
 function resize() {
     
@@ -975,11 +1037,17 @@ function reset_history(){
 }
 
 function stop_drawing() {
+    if (isPointerDown && currentAction.type === 'D') {
+        secondary_ctx.clearRect(0, 0, canvas.width, canvas.height);
+        currentAction = {};
+    }
+    canvasPointerId = null;
+    hoveringPenButtonId = null;
+    wrapper.classList.remove('nopointer');
     clearFreehandPreview();
     reset_to_main_pen_settings()
     submitCurrentText()
     isPointerDown = false;
-	drawingWithPressurePenOnly = false;
 }
 
 function start_drawing() {
@@ -1131,8 +1199,6 @@ async function draw_upto_latest_point_async(startLine, startPoint, startStroke){
         }
 	}
 }
-
-var drawingWithPressurePenOnly = false; // hack for drawing with 2 main pointers when using a presure sensitive pen
 
 function calculateClearBox(pointsArray) {
     if (!pointsArray.length) return {x: 0, y: 0, width: 0, height: 0};
@@ -1357,7 +1423,7 @@ function pointerDownLineText(e) {
         fontBold: fontBold,
         fontItalic: fontItalic
     };
-    textBox.focus()
+    textBox.focus({preventScroll: true})
 };
 // Prevent arrow key cursor movement
 textBox.addEventListener('keydown', e => {
@@ -1383,10 +1449,10 @@ textBox.addEventListener('focus', () => startCursorBlink());
 textBox.addEventListener('blur', () => {clearInterval(cursorBlinkInterval); submitCurrentText();});
 // Prevent canvas click from stealing focus
 canvas_wrapper.addEventListener('pointerdown', e => {
-    if(!textWriting)return;
+    if(!textWriting || currentAction.type === 'D')return;
     e.preventDefault(); // Prevent focus loss    
     // Ensure textarea stays focused
-    textBox.focus();
+    textBox.focus({preventScroll: true});
 });
 
 // Helper functions for calculations
@@ -1446,10 +1512,6 @@ function drawTextFromAction(paramCtx, action){
 }
 
 function pointerDownLine(e) {
-    wrapper.classList.add('nopointer');
-	if (!e.isPrimary || calligraphy || strokeDelete || textWriting) { return; }
-	if (e.pointerType[0] == 'p' && pressureSensitivity) { drawingWithPressurePenOnly = true }
-	else if ( drawingWithPressurePenOnly) { return; }
     var pen = getPenColorAndWidthByIndex(activePenIndex);
     if(!isPointerDown){
         e.preventDefault();
@@ -1477,9 +1539,6 @@ function pointerDownLine(e) {
 }
 
 function pointerMoveLine(e) {
-	if (!e.isPrimary || calligraphy || strokeDelete || textWriting) { return; }
-	if (e.pointerType[0] != 'p' && drawingWithPressurePenOnly) { return; }
-    var pen = getPenColorAndWidthByIndex(activePenIndex);
     if (isPointerDown) {
         currentAction.points.push([
 			e.offsetX,
@@ -1503,11 +1562,7 @@ function pointerMoveLine(e) {
 }
 
 function pointerUpLine(e) {
-    wrapper.classList.remove('nopointer');
     /* Needed for the last bit of the drawing. */
-	if (!e.isPrimary || calligraphy || strokeDelete || textWriting) { return; }
-	if (e.pointerType[0] != 'p' && drawingWithPressurePenOnly) { return; }
-    var pen = getPenColorAndWidthByIndex(activePenIndex);
     if (isPointerDown) {
         currentAction.points.push([
 			e.offsetX,
@@ -1632,96 +1687,99 @@ document.addEventListener('keyup', function(e) {
 // ----------------------------------------- Stroke Delete -----------------------------------------
 
 
-function doLinesIntersect(line1, line2) {
-    function lineLine(x1, y1, x2, y2, x3, y3, x4, y4) {
-        // calculate the distance to intersection point
-        var uA = ((x4-x3)*(y1-y3) - (y4-y3)*(x1-x3)) / ((y4-y3)*(x2-x1) - (x4-x3)*(y2-y1));
-        var uB = ((x2-x1)*(y1-y3) - (y2-y1)*(x1-x3)) / ((y4-y3)*(x2-x1) - (x4-x3)*(y2-y1));
+function distanceToSegmentSquared(point, a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const lengthSquared = dx * dx + dy * dy;
+    const t = lengthSquared ? Math.max(0, Math.min(1,
+        ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / lengthSquared)) : 0;
+    return (point[0] - a[0] - t * dx) ** 2 + (point[1] - a[1] - t * dy) ** 2;
+}
 
-        // if uA and uB are between 0-1, lines are colliding
-        if (uA >= 0 && uA <= 1 && uB >= 0 && uB <= 1) {
-            return true;
-        }
-    return false;
-    }
-    // Iterate over all points in the two arrays
-    for (let i = 0; i < line1.length - 1; i++) {
-        for (let j = 0; j < line2.length - 1; j++) {
-            if (lineLine(line1[i][0], line1[i][1], line1[i + 1][0], line1[i + 1][1], line2[j][0], line2[j][1], line2[j + 1][0], line2[j + 1][1])) {
-                return true; // Lines intersect
+function segmentsTouch(a, b, c, d, radius) {
+    if (Math.max(a[0], b[0]) + radius < Math.min(c[0], d[0]) ||
+        Math.max(c[0], d[0]) + radius < Math.min(a[0], b[0]) ||
+        Math.max(a[1], b[1]) + radius < Math.min(c[1], d[1]) ||
+        Math.max(c[1], d[1]) + radius < Math.min(a[1], b[1])) return false;
+    // A crossing, or an endpoint inside the other segment's round cap/edge.
+    const side = (p, q, r) => (q[0]-p[0]) * (r[1]-p[1]) - (q[1]-p[1]) * (r[0]-p[0]);
+    if (side(a,b,c) * side(a,b,d) < 0 && side(c,d,a) * side(c,d,b) < 0) return true;
+    const r2 = radius * radius;
+    return distanceToSegmentSquared(a, c, d) <= r2 || distanceToSegmentSquared(b, c, d) <= r2 ||
+           distanceToSegmentSquared(c, a, b) <= r2 || distanceToSegmentSquared(d, a, b) <= r2;
+}
+
+function eraserHitsStroke(stroke, eraser, bounds) {
+    // Start with a zero-length segment so a tap and a one-point stroke can both hit.
+    let a = stroke.points[0];
+    for (const b of stroke.points) {
+        const inkWidth = stroke.type === 'L' ? Math.max(a[3], b[3]) : stroke.width;
+        const radius = (eraser.width + (inkWidth || 0)) / 2;
+        if (Math.max(a[0], b[0]) + radius >= bounds.x && Math.min(a[0], b[0]) - radius <= bounds.x + bounds.width &&
+            Math.max(a[1], b[1]) + radius >= bounds.y && Math.min(a[1], b[1]) - radius <= bounds.y + bounds.height) {
+            let c = eraser.points[0];
+            for (const d of eraser.points) {
+                if (segmentsTouch(a, b, c, d, radius)) return true;
+                c = d;
             }
         }
+        a = b;
     }
-
-    return false; // No intersections
+    return false;
 }
 
 function pointerDownStrokeDelete(e) {
-    wrapper.classList.add('nopointer');
-    if (!e.isPrimary || !strokeDelete) { return; }
-    submitCurrentText()
     e.preventDefault();
-    // Use solid red for delete mode, not transparent
-    var pen = getPenColorAndWidthByIndex(activePenIndex);
-    currentAction = {
-        points: [],
-        color: "rgba(255, 0, 0, 1)",
-        width: 4,
-        opacity: '1',
-        visible: true,
-        type: 'D', // 'simple', 'perfect', or 'calligraphy'
-    };
-    secondary_ctx.strokeStyle = secondary_ctx.fillStyle = currentAction.color;
-    secondary_ctx.lineWidth = currentAction.width;
-
-    start_drawing();
-};
-
-function pointerMoveStrokeDelete(e) {
-    if (!e.isPrimary || !strokeDelete) { return; }
-    if(isPointerDown) {
-        var mousePos = [e.offsetX, e.offsetY];
-        if(currentAction.points.length != 0) {
-            if(getDist(mousePos,currentAction.points[currentAction.points.length-1])>=MIN_MOUSE_DIST)
-                currentAction.points.push(mousePos);
-            secondary_ctx.lineWidth = 4;
-            drawCurrentPath();
-        } else
-            currentAction.points.push(mousePos);
-    } 
-};
-
-function finishDelete(){
-    if (!strokeDelete || !currentAction.points || !currentAction.points.length) { return; }
-    stop_drawing();
-    var pen = getPenColorAndWidthByIndex(activePenIndex)
-    secondary_ctx.strokeStyle = pen[0] // active pen Color;
-    secondary_ctx.fillStyle = pen[0] //active pen Color;
-    secondary_ctx.lineWidth = pen[1] //active pen Color;
-    marked_lines = []
-    for (let lineIndex = 0; lineIndex < lineHistory.length; lineIndex++) {
-        const element = lineHistory[lineIndex];
-        if(!element.points || !element.type == 'D' || !element.visible) continue;
-        if(doLinesIntersect(element.points, currentAction.points)){
-            element.visible = false;//mark as deleted
-            marked_lines.push(lineIndex)//add reference for easy undo
-        }
-    }
-    if(marked_lines.length){
-        currentAction.deletedList = marked_lines;//add list of lines which were deleted to the list
-        currentAction.type = 'D'
-        add_action_to_history(currentAction);
-    }
-    secondary_ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);//clear the guide line in second canvas
-    ts_redraw()
+    submitCurrentText();
+    if (textWriting) textBox.blur();
+    currentAction = {type: 'D', points: [], color: 'red', width: 4};
+    isPointerDown = true;
+    appendErasePoint(e);
 }
 
-function pointerUpStrokeDelete(e) {
-    wrapper.classList.remove('nopointer');
+function appendErasePoint(e) {
+    let point;
+    if (e.target === canvas || e.target === secondary_canvas) {
+        point = [e.offsetX, e.offsetY];
+    } else {
+        const rect = canvas.getBoundingClientRect();
+        point = [e.clientX - rect.left - canvas.clientLeft, e.clientY - rect.top - canvas.clientTop];
+    }
+    const points = currentAction.points;
+    const last = points[points.length - 1];
+    if (last && last[0] === point[0] && last[1] === point[1]) return;
+    points.push(point);
+    if (!last) return;
+    secondary_ctx.save();
+    secondary_ctx.strokeStyle = currentAction.color;
+    secondary_ctx.lineWidth = currentAction.width;
+    secondary_ctx.beginPath();
+    secondary_ctx.moveTo(last[0], last[1]);
+    secondary_ctx.lineTo(point[0], point[1]);
+    secondary_ctx.stroke();
+    secondary_ctx.restore();
+}
+
+function finishDelete() {
+    if (!isPointerDown || currentAction.type !== 'D') return;
+    const eraser = currentAction;
     stop_drawing();
-    if (!e.isPrimary || !strokeDelete || !currentAction.points || !currentAction.points.length) { return; }
-    finishDelete();
-};
+    const bounds = calculateClearBox(eraser.points);
+    const deleted = [];
+    for (let i = lineHistory.length - 1; i >= 0; i--) {
+        const stroke = lineHistory[i];
+        if (stroke.type === 'X') break;
+        if (!stroke.visible || stroke.type === 'D' || !stroke.points || !stroke.points.length) continue;
+        if (eraserHitsStroke(stroke, eraser, bounds)) {
+            stroke.visible = false;
+            deleted.push(i);
+        }
+    }
+    if (deleted.length) {
+        eraser.deletedList = deleted.reverse();
+        add_action_to_history(eraser);
+        ts_redraw();
+    }
+}
 
 // ----------------------------------------- Perfect Freehand -----------------------------------------
 
@@ -1850,8 +1908,6 @@ function drawCurrentPath() {
 }
 
 function pointerDownCaligraphy(e) {
-    wrapper.classList.add('nopointer');
-    if (!e.isPrimary || !calligraphy) { return; }
     e.preventDefault();//don't paint anything when clicking on buttons, especially for undo to work
     var pen = getPenColorAndWidthByIndex(activePenIndex);
     currentAction = {
@@ -1866,7 +1922,6 @@ function pointerDownCaligraphy(e) {
 };
 
 function pointerMoveCaligraphy(e) {
-    if (!e.isPrimary || !calligraphy) { return; }
     if(isPointerDown) {
         var mousePos = [e.offsetX, e.offsetY];
         if(currentAction.points.length != 0) {
@@ -1879,9 +1934,8 @@ function pointerMoveCaligraphy(e) {
 };
 
 function pointerUpCaligraphy(e) {
-    wrapper.classList.remove('nopointer');
     stop_drawing();
-    if (!e.isPrimary || !calligraphy || !currentAction.points || !currentAction.points.length) { return; }
+    if (!currentAction.points.length) return;
     
     add_action_to_history(currentAction)
     secondary_ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);//clear the guide line in second canvas

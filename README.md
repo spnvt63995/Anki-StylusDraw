@@ -23,6 +23,11 @@ Website to test the drawing functionality: https://rytisgit.github.io/Anki-Stylu
 
 ## Hardware
 Tested to work with a Huion H1161, Windows Pen enabled.
+
+On the review canvas, hold the pen's eraser or side button before touching the screen.
+Tap a stroke or cross several strokes, then lift the pen to erase them. Undo restores
+the strokes together. Release the button before touching down to use the selected pen again.
+
 ### For best experience:
 * #### don't use software rendering(enable hardware acceleration) 
 * #### turn on use pen as a mouse with Windows Pen
