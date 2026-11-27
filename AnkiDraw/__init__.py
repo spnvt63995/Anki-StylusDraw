@@ -975,6 +975,7 @@ function reset_history(){
 }
 
 function stop_drawing() {
+    clearFreehandPreview();
     reset_to_main_pen_settings()
     submitCurrentText()
     isPointerDown = false;
@@ -1466,10 +1467,7 @@ function pointerDownLine(e) {
             (e.pointerType[0] == 'p' && pressureSensitivity) ? e.pressure : 2,//set pressure for perfect draw
 			(e.pointerType[0] == 'p' && pressureSensitivity) ? (1.0 + e.pressure * currentAction.width * 2) : currentAction.width]);//set pressure for simple lines
         if(perfectFreehand){
-            const box = calculateClearBox(currentAction.points);
-            secondary_ctx.clearRect(box.x, box.y, box.width, box.height);
-            var path = new Path2D(getFreeDrawSvgPath(currentAction.points, currentAction.width, true)) 
-            secondary_ctx.fill(path)
+            drawFreehandPreview();
         }
         else{
             draw_secondary_path_at_some_point_async(currentAction.points[0][0],currentAction.points[0][1],currentAction.points[0][0],currentAction.points[0][1],currentAction.points[0][0],currentAction.points[0][1],currentAction.points[0][3])
@@ -1489,10 +1487,11 @@ function pointerMoveLine(e) {
             (e.pointerType[0] == 'p' && pressureSensitivity) ? e.pressure : 2,
 			(e.pointerType[0] == 'p' && pressureSensitivity) ? (1.0 + e.pressure * currentAction.width * 2) : currentAction.width]);
         if(perfectFreehand){
-            const box = calculateClearBox(currentAction.points);
-            secondary_ctx.clearRect(box.x, box.y, box.width, box.height);
-            var path = new Path2D(getFreeDrawSvgPath(currentAction.points, currentAction.width, true)) 
-            secondary_ctx.fill(path)
+            if (currentAction.points.length <= immediateFreehandPoints) {
+                drawFreehandPreview();
+            } else if (freehandPreviewFrame === null) {
+                freehandPreviewFrame = requestAnimationFrame(drawFreehandPreview);
+            }
         }
         else{
             p1 = currentAction.points.length > 2 ? currentAction.points.length-3 : 0;
@@ -1516,20 +1515,14 @@ function pointerUpLine(e) {
             (e.pointerType[0] == 'p' && pressureSensitivity) ? e.pressure : 2,
 			(e.pointerType[0] == 'p' && pressureSensitivity) ? (1.0 + e.pressure * currentAction.width * 2) : currentAction.width]);
 
-        if(perfectFreehand){
-            const box = calculateClearBox(currentAction.points);
-            secondary_ctx.clearRect(box.x, box.y, box.width, box.height);
-            var path = new Path2D(getFreeDrawSvgPath(currentAction.points, currentAction.width,true)) 
-            secondary_ctx.fill(path)
-        }
-        else{
+        if(!perfectFreehand){
             p1 = currentAction.points.length > 2 ? currentAction.points.length-3 : 0;
             p2 = currentAction.points.length > 1 ? currentAction.points.length-2 : 0;
             p3 = currentAction.points.length - 1;
             draw_secondary_path_at_some_point_async(currentAction.points[p1][0],currentAction.points[p1][1],currentAction.points[p2][0],currentAction.points[p2][1],currentAction.points[p3][0],currentAction.points[p3][1],currentAction.points[p3][3])
+            secondary_ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
         }
         add_action_to_history(currentAction)
-        secondary_ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);//clear the guide line in second canvas
     } 
 	stop_drawing();
     
@@ -1766,7 +1759,7 @@ function getSvgPathFromStroke(points){
     .replace(TO_FIXED_PRECISION, "$1");
 }
 
-function getFreeDrawSvgPath(inputPoints, width, complete) {
+function freehandOutline(inputPoints, width, complete) {
   // Consider changing the options for simulated pressure vs real pressure
 
   const options = {
@@ -1779,7 +1772,48 @@ function getFreeDrawSvgPath(inputPoints, width, complete) {
     last: complete, // LastCommittedPoint is added on pointerup
   };
 
-  return getSvgPathFromStroke(getStroke(inputPoints, options));
+  return getStroke(inputPoints, options);
+}
+
+function getFreeDrawSvgPath(inputPoints, width, complete) {
+    return getSvgPathFromStroke(freehandOutline(inputPoints, width, complete));
+}
+
+var freehandPreviewFrame = null;
+var freehandPreviewBounds = null;
+// Short strokes are cheap enough to show immediately, even between display frames.
+const immediateFreehandPoints = 32;
+
+function clearFreehandPreview() {
+    if (freehandPreviewFrame !== null) {
+        cancelAnimationFrame(freehandPreviewFrame);
+        freehandPreviewFrame = null;
+    }
+    if (freehandPreviewBounds) {
+        const {x, y, width, height} = freehandPreviewBounds;
+        secondary_ctx.clearRect(x, y, width, height);
+        freehandPreviewBounds = null;
+    }
+}
+
+function drawFreehandPreview() {
+    freehandPreviewFrame = null;
+    clearFreehandPreview();
+    const outline = freehandOutline(currentAction.points, currentAction.width, true);
+    if (!outline.length) return;
+
+    // Match the committed SVG's two decimal places without serializing it on every frame.
+    const coord = value => Math.trunc(value * 100) / 100;
+    const path = new Path2D();
+    path.moveTo(coord(outline[0][0]), coord(outline[0][1]));
+    for (let i = 0; i < outline.length; i++) {
+        const [x, y] = outline[i];
+        const next = outline[(i + 1) % outline.length];
+        path.quadraticCurveTo(coord(x), coord(y), coord((x + next[0]) / 2), coord((y + next[1]) / 2));
+    }
+    path.closePath();
+    secondary_ctx.fill(path);
+    freehandPreviewBounds = calculateClearBox(outline);
 }
 /*
  -------------------------------- Caligrapher ------------------------------------------
